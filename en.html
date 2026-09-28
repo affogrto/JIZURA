@@ -517,7 +517,7 @@ dialog.terms a { color: var(--cyan); word-break: break-all; }
 
       <div class="tabpane" data-pane="media" hidden>
         <h3>Image layers</h3>
-        <p class="note">Transparent PNGs keep their alpha. Put a subject in front of the lyrics to make text pass behind it. Images and imported audio are embedded in the project file.</p>
+        <p class="note">When multiple background images are added, one is randomly shown per lyric line. Repeated lyrics reuse the same image. Foreground media layers remain stacked. Images and imported audio are embedded in the project file.</p>
         <label class="file">Add images (multiple files)<input id="mediaFiles" type="file" accept="image/*" multiple></label>
         <div id="mediaLayers" class="media-layers"></div>
         <div id="cutoutEditor" class="cutout-editor" hidden>
@@ -3301,14 +3301,37 @@ J.plan = (project, audio) => {
   const nSchemes = st.schemes.length;
   const addEvent = (t, type, amp, dur) => plan.events.push({ t, type, amp, dur });
 
+  const repeatKey = ln => ln.text.normalize ? ln.text.normalize('NFC').replace(/\s+/g, ' ').trim() : ln.text.replace(/\s+/g, ' ').trim();
+  const backMedia = plan.mediaLayers.map((layer, index) => ({ layer, index })).filter(x => x.layer && x.layer.data && (x.layer.place || 'back') === 'back');
+  const mediaByLine = [];
+  if (backMedia.length) {
+    const rng = J.rng(J.h(project.seed, 0x4d454449));
+    const shuffle = list => {
+      const out = list.slice();
+      for (let i = out.length - 1; i > 0; i--) { const j = rng.int(0, i); [out[i], out[j]] = [out[j], out[i]]; }
+      return out;
+    };
+    const picks = new Map(); let deck = [], previous = null;
+    parsed.lines.forEach((ln, li) => {
+      const key = (project.repeatLines !== false ? repeatKey(ln) : repeatKey(ln) + '\\u0000' + li);
+      if (!picks.has(key)) {
+        if (!deck.length) {
+          deck = shuffle(backMedia);
+          if (deck.length > 1 && deck[0].index === previous) [deck[0], deck[1]] = [deck[1], deck[0]];
+        }
+        const chosen = deck.shift(); picks.set(key, chosen.index); previous = chosen.index;
+      }
+      mediaByLine[li] = picks.get(key);
+    });
+  }
+
   // title card
   const firstStart = tm.starts.length ? tm.starts[0] : 0;
   if (title && firstStart >= 1.1) {
     const rng = J.rng(J.h(project.seed, 999));
-    plan.cuts.push(makeCut({ text: title, note: artist, lineText: title, line: -1, start: 0.1, end: firstStart - 0.04, layout: 'title', enter: rng.pick(['blur', 'type', 'wipe', 'assemble']), exit: rng.pick(['blur', 'drift', 'wipe']), hold: 'still', params: J.LAYOUTS.title.plan(rng, {}, st), decor: [], scheme: 0, seed: J.h(project.seed, 999, 1) }));
+    plan.cuts.push(makeCut({ text: title, note: artist, lineText: title, line: -1, mediaIndex: mediaByLine[0], start: 0.1, end: firstStart - 0.04, layout: 'title', enter: rng.pick(['blur', 'type', 'wipe', 'assemble']), exit: rng.pick(['blur', 'drift', 'wipe']), hold: 'still', params: J.LAYOUTS.title.plan(rng, {}, st), decor: [], scheme: 0, seed: J.h(project.seed, 999, 1) }));
   }
 
-  const repeatKey = ln => ln.text.normalize ? ln.text.normalize('NFC').replace(/\s+/g, ' ').trim() : ln.text.replace(/\s+/g, ' ').trim();
   const repeatCounts = new Map();
   if (project.repeatLines !== false) parsed.lines.forEach(ln => {
     const key = repeatKey(ln); repeatCounts.set(key, (repeatCounts.get(key) || 0) + 1);
@@ -3330,7 +3353,7 @@ J.plan = (project, audio) => {
     const karaoke = !!ov.karaoke;
     const visEnd = karaoke ? e : Math.min(e, s + Math.max(3.6, n * 0.5 + 1.2));
     const D = visEnd - s;
-    plan.lines.push({ index: li, text: ln.text, start: s, end: e, visEnd, note: ln.note, impact: ln.impact, emph: ln.emph, chunks: null, seed: lineSeed });
+    plan.lines.push({ index: li, text: ln.text, start: s, end: e, visEnd, note: ln.note, impact: ln.impact, emph: ln.emph, chunks: null, seed: lineSeed, mediaIndex: mediaByLine[li] });
     const chunks = ln.manual || (plan.lang === 'en' ? J.phraseChunks(J.chunkText(ln.text)) : J.chunkText(ln.text));
     plan.lines[li].chunks = chunks;
     const L = J.lerp(1.3, 0.5, fx.density);
@@ -3401,7 +3424,7 @@ J.plan = (project, audio) => {
           prevCut.exit = 'cut'; prevCut.outDur = 0;
         }
       }
-      const cut = makeCut({ text: txt, lineText: ln.text, note: ln.note, line: li, start: cs, end: ce, layout, enter, exit, hold, inDur, outDur, params, decor, scheme: sch, seed: J.h(lineSeed, k, 17), emph, recap: !!u.recap, words: J.chunkText(txt), stagger: rng.range(0.025, 0.06),
+      const cut = makeCut({ text: txt, lineText: ln.text, note: ln.note, line: li, mediaIndex: mediaByLine[li], start: cs, end: ce, layout, enter, exit, hold, inDur, outDur, params, decor, scheme: sch, seed: J.h(lineSeed, k, 17), emph, recap: !!u.recap, words: J.chunkText(txt), stagger: rng.range(0.025, 0.06),
         treat, treatP, bg, bgP: bg === lineBg ? lineBgP : {}, cam, camP, trans, transP, transDur });
       plan.cuts.push(cut);
       history.push({ layout, enter, exit, hold, treat, cam, trans, decor: decor.map(d => d.id) });
@@ -3430,7 +3453,7 @@ J.plan = (project, audio) => {
     const nextStart = li < parsed.lines.length - 1 ? tm.starts[li + 1] : null;
     if (nextStart != null && nextStart - visEnd > 1.3) {
       const r2 = J.rng(J.h(lineSeed, 404));
-      plan.cuts.push(makeCut({ text: title || '', lineText: '', line: li, start: visEnd, end: nextStart, layout: 'interlude', enter: 'blur', exit: 'blur', hold: 'still', inDur: 0.3, outDur: 0.3, params: J.LAYOUTS.interlude.plan(r2), decor: pickDecor(r2, st, en, Object.assign({}, fx, { decor: 1 }), 'interlude'), scheme: schemeIdx, seed: J.h(lineSeed, 405) }));
+      plan.cuts.push(makeCut({ text: title || '', lineText: '', line: li, mediaIndex: mediaByLine[li], start: visEnd, end: nextStart, layout: 'interlude', enter: 'blur', exit: 'blur', hold: 'still', inDur: 0.3, outDur: 0.3, params: J.LAYOUTS.interlude.plan(r2), decor: pickDecor(r2, st, en, Object.assign({}, fx, { decor: 1 }), 'interlude'), scheme: schemeIdx, seed: J.h(lineSeed, 405) }));
     }
     if (sharedContext) {
       history = sharedContext.history; bgHistory = sharedContext.bgHistory; fxHistory = sharedContext.fxHistory; schemeIdx = sharedContext.schemeIdx;
@@ -3762,9 +3785,11 @@ class Renderer {
 
   ensure(c, w, h) { if (c.width !== w || c.height !== h) { c.width = w; c.height = h; } return c; }
 
-  drawMedia(ctx, plan, place, W, H) {
-    for (const layer of plan.mediaLayers || []) {
-      if (!layer || !layer.data || layer.place !== place) continue;
+  drawMedia(ctx, plan, place, W, H, selectedIndex = null) {
+    if (place === 'back' && selectedIndex == null) return;
+    for (const [index, layer] of (plan.mediaLayers || []).entries()) {
+      if (!layer || !layer.data || (layer.place || 'back') !== place) continue;
+      if (place === 'back' && selectedIndex != null && index !== selectedIndex) continue;
       let im = this.assetImages.get(layer.id);
       if (!im || im.__src !== layer.data) {
         im = new Image(); im.__src = layer.data; im.src = layer.data; this.assetImages.set(layer.id, im);
@@ -3814,7 +3839,7 @@ class Renderer {
         ctx.filter = 'none'; ctx.globalAlpha = 1; ctx.globalCompositeOperation = 'source-over';
       }
     }
-    if (!key && (!opt.transparent || opt.layer === 'back')) this.drawMedia(ctx, plan, 'back', W, H);
+    if (!key && (!opt.transparent || opt.layer === 'back')) this.drawMedia(ctx, plan, 'back', W, H, mainCut && mainCut.mediaIndex);
     // ---------- camera & chroma amounts ----------
     const u = H / 1080;
     const events = plan.events;
